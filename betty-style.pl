@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 # (c) 2001, Dave Jones. (the file handling bit)
 # (c) 2005, Joel Schopp <jschopp@austin.ibm.com> (the ugly bit)
 # (c) 2007,2008, Andy Whitcroft <apw@uk.ibm.com> (new conditions, test suite)
@@ -6,6 +6,7 @@
 # Licensed under the terms of the GNU GPL License version 2
 
 use strict;
+use warnings;
 use POSIX;
 use File::Basename;
 use Cwd 'abs_path';
@@ -60,6 +61,7 @@ my $spelling_file = "$D/spelling.txt";
 my $codespell = 0;
 my $codespellfile = "/usr/share/codespell/dictionary.txt";
 my $color = 1;
+my $recursive = 0;
 
 sub printVersion {
 	my ($exitcode) = @_;
@@ -133,6 +135,7 @@ Options:
                              Set it to -1 for infinite
   --no-safe-guard            Don't check for header files protection
   --allow-global-variables   Allow global variable definition
+  -r, --recursive            Run for every C source file (.c and .h) recursively
 
   -h, --help, --version      Display this help and exit
 
@@ -235,6 +238,7 @@ GetOptions(
 	'max-funcs=i'	=> \$max_funcs,
 	'safe-guard!'	=> \$safe_guard,
 	'allow-global-variables!'	=> \$allow_global_variables,
+	'r|recursive!'	=> \$recursive
 ) or help(1);
 
 help(0) if ($help);
@@ -255,7 +259,7 @@ if ($^V && $^V lt $minimum_perl_version) {
 	}
 }
 
-if ($#ARGV < 0) {
+if ($recursive == 0 && $#ARGV < 0) {
 	my $exec_name = basename($P);
 	print "$exec_name: no input files\n";
 	exit(1);
@@ -859,8 +863,18 @@ if ($git) {
 	@ARGV = @commits;
 }
 
+my @files_to_process = @ARGV;
+if ($recursive == 1) {
+	@files_to_process = split(/\n/, `find . -name "*.c" -o -name "*.h"`);
+	if (scalar @files_to_process == 0) {
+		my $exec_name = basename($P);
+		print "$exec_name: no input files\n";
+		exit(1);
+	}
+}
+
 my $vname;
-for my $filename (@ARGV) {
+for my $filename (@files_to_process) {
 	my $FILE;
 	if ($git) {
 		open($FILE, '-|', "git format-patch -M --stdout -1 $filename") ||
@@ -2233,6 +2247,9 @@ sub process {
 	$linenr = 0;
 	$fixlinenr = -1;
 	my $nbfunc = 0;
+	my $infunc = 0;
+	my $infuncproto = 0;
+	my $funcprotovalid = 0; # Prevline ended a valid function prototype (no trailing ';')
 	my $inscope = 0;
 	my $funclines = 0;
 
@@ -2830,6 +2847,23 @@ sub process {
 			}
 		}
 
+		my $no_comment = $rawline;
+		if ($no_comment =~ /\/\*/ || $no_comment =~ /\*\//) {
+			if ($no_comment =~ /\/\*/ && $no_comment =~ /\*\//) {
+				$no_comment =~ s/\/\*.*\*\///;
+			} elsif ($no_comment =~ /\/\*/) {
+				$no_comment =~ s/\/\*.*//;
+			} else {
+				$no_comment =~ s/.*\*\///;
+			}
+		}
+		if ($no_comment =~ /;\s*[^\s]+/ &&
+		    $no_comment !~ /for/) {
+			# TODO: Really bad detection. To bed fixed
+			#WARN("MULTIPLE_INSTRUCTIONS",
+			#    "multiple instructions on a single line\n");
+		    }
+
 # check for adding lines without a newline.
 		if ($line =~ /^\+/ && defined $lines[$linenr] && $lines[$linenr] =~ /^\\ No newline at end of file/) {
 			WARN("MISSING_EOF_NEWLINE",
@@ -3020,9 +3054,13 @@ sub process {
 			# actual declarations
 		    ($prevline =~ /^\+\s+$Declare\s*$Ident\s*[=,;:\[]/ ||
 			# function pointer declarations
-		     $prevline =~ /^\+\s+$Declare\s*\(\s*\*\s*$Ident\s*\)\s*[=,;:\[\(]/ ||
+		     $prevline =~ /^\+\s+$Declare\s*\(\s*\*+\s*$Ident\s*\)\s*[=,;:\[\(]/ ||
 			# foo bar; where foo is some local typedef or #define
-		     $prevline =~ /^\+\s+$Ident(?:\s+|\s*\*\s*)$Ident\s*[=,;\[]/ ||
+		     $prevline =~ /^\+\s+$Ident(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
+			# const foo bar; where foo is some local typedef or #define
+		     $prevline =~ /^\+\s+\bconst\b\s+$Ident(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
+			# foo const bar; where foo is some local typedef or #define
+		     $prevline =~ /^\+\s+$Ident\s+\bconst\b(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
 			# known declaration macros
 		     $prevline =~ /^\+\s+$declaration_macros/) &&
 			# for "else if" which can look like "$Ident $Ident"
@@ -3034,9 +3072,13 @@ sub process {
 			# looks like a declaration
 		    !($sline =~ /^\+\s+$Declare\s*$Ident\s*[=,;:\[]/ ||
 			# function pointer declarations
-		      $sline =~ /^\+\s+$Declare\s*\(\s*\*\s*$Ident\s*\)\s*[=,;:\[\(]/ ||
+		      $sline =~ /^\+\s+$Declare\s*\(\s*\*+\s*$Ident\s*\)\s*[=,;:\[\(]/ ||
 			# foo bar; where foo is some local typedef or #define
-		      $sline =~ /^\+\s+$Ident(?:\s+|\s*\*\s*)$Ident\s*[=,;\[]/ ||
+		      $sline =~ /^\+\s+$Ident(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
+			# const foo bar; where foo is some local typedef or #define
+		      $sline =~ /^\+\s+\bconst\b\s+$Ident(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
+			# foo const bar; where foo is some local typedef or #define
+		      $sline =~ /^\+\s+$Ident\s+\bconst\b(?:\s+|\s*\*+\s*)$Ident\s*[=,;\[]/ ||
 			# known declaration macros
 		      $sline =~ /^\+\s+$declaration_macros/ ||
 			# start of struct or union or enum
@@ -3046,9 +3088,13 @@ sub process {
 			# bitfield continuation
 		      $sline =~ /^\+\s+$Ident\s*:\s*\d+\s*[,;]/ ||
 			# other possible extensions of declaration lines
-		      $sline =~ /^\+\s+\(?\s*(?:$Compare|$Assignment|$Operators)/) &&
+		      $sline =~ /^\+\s+\(?\s*(?:$Compare|$Assignment|$Operators)/ ||
+			# array of function pointers
+		      $sline =~ /\+\s+($Ident)\s*\(\*+$Ident(?:\[\S*\])?\)\s*\((?:(?:,\s*)?$Ident)*\);/ ||
+		      $sline =~ /\+\s+($Ident)\s*\(\*+$Ident(?:\[\S*\])?\)\s*\((?:(?:,\s*)?$Ident)*\)\s*=/) &&
 			# indentation of previous and current line are the same
 		    (($prevline =~ /\+(\s+)\S/) && $sline =~ /^\+$1\S/)) {
+
 			if (WARN("LINE_SPACING",
 				 "Missing a blank line after declarations\n" . $hereprev) &&
 			    $fix) {
@@ -3067,6 +3113,20 @@ sub process {
 				 "please, no spaces at the start of a line\n" . $herevet) &&
 			    $fix) {
 				$fixed[$fixlinenr] =~ s/^\+([ \t]+)/"\+" . tabify($1)/e;
+			}
+		}
+
+# check for multiple instructions on a single line
+		if ($rawline =~ /;/) {
+			my $pure = $rawline;
+			$pure =~ s/\/\*+.*//;
+			$pure =~ s/.*\*+\///;
+			$pure =~ s/['][^']*[']//g;
+			$pure =~ s/["][^"]*["]//g;
+			my $count = () = $pure =~ /;/g;
+			if ($count > 1 && $pure !~ /\bfor\b/) {
+				WARN("MULTI_INS",
+				    "Multiple instructions on a single line is forbidden\n");
 			}
 		}
 
@@ -3493,7 +3553,7 @@ sub process {
 				$fixedline =~ s/\s*=\s*$/ = {/;
 				fix_insert_line($fixlinenr, $fixedline);
 				$fixedline = $line;
-				$fixedline =~ s/^(.\s*){\s*/$1/;
+				$fixedline =~ s/^(.\s*)\{\s*/$1/;
 				fix_insert_line($fixlinenr, $fixedline);
 			}
 		}
@@ -3577,12 +3637,13 @@ sub process {
 		}
 
 # Check for global variables (not allowed).
-		if ($allow_global_variables == 0) {
-			if ($inscope == 0 &&
-				($line =~ /^\+\s*$Type\s*$Ident(?:\s+$Modifier)*(?:\s*=\s*.*)?;/ ||
-				$line =~ /^\+\s*$Declare\s*\(\s*\*\s*$Ident\s*\)\s*[=,;:\[\(].*;/ ||
-				$line =~ /^\+\s*$Ident(?:\s+|\s*\*\s*)$Ident\s*[=,;\[]/ ||
-				$line =~ /^\+\s*$declaration_macros/)) {
+		if ($allow_global_variables == 0 &&
+		    $inscope == 0 &&
+		    $infuncproto == 0) {
+			if ($line =~ /^\+\s*$Type\s*$Ident(?:\s+$Modifier)*(?:\s*=\s*.*)?;/ ||
+			    $line =~ /^\+\s*$Declare\s*\(\s*\*\s*$Ident\s*\)\s*[=,;:\[\(].*;/ ||
+			    $line =~ /^\+\s*$Ident(?:\s+|\s*\*\s*)$Ident\s*[=,;\[]/ ||
+			    $line =~ /^\+\s*$declaration_macros/) {
 				ERROR("GLOBAL_DECLARATION",
 					"global variables are not allowed\n" . $herecurr);
 			}
@@ -3640,11 +3701,11 @@ sub process {
 		}
 
 # check for non-global char *foo[] = {"bar", ...} declarations.
-		if ($line =~ /^.\s+(?:static\s+|const\s+)?char\s+\*\s*\w+\s*\[\s*\]\s*=\s*\{/) {
-			WARN("STATIC_CONST_CHAR_ARRAY",
-			     "char * array declaration might be better as static const\n" .
-				$herecurr);
-               }
+	# 	if ($line =~ /^.\s+(?:static\s+|const\s+)?char\s+\*\s*\w+\s*\[\s*\]\s*=\s*\{/) {
+	# 		WARN("STATIC_CONST_CHAR_ARRAY",
+	# 		     "char * array declaration might be better as static const\n" .
+	# 			$herecurr);
+        #        }
 
 # check for function declarations without arguments like "int foo()"
 		if ($line =~ /(\b$Type\s+$Ident)\s*\(\s*\)/) {
@@ -3831,24 +3892,36 @@ sub process {
 			}
 		}
 
+# Detect possible multiline function definition
+		if (!$infuncproto && $line =~ /^.((?:typedef\s*)?(?:(?:$Storage|$Inline)\s*(?:$Attribute\s*)?)*\s*$Type\s*(?:\b$Ident|\(\*\s*$Ident\))\s*)\(/s) {
+			$funcprotovalid = 0;
+			$infuncproto = 0;
+
+			if ($line =~ /\)\s*$/ && ($line =~ tr/(// == $line =~ tr/)//)) {
+				# Line ends with closing parenthesis -> End of function prototype
+				$funcprotovalid = 1;
+			}
+			else {
+				$infuncproto = 1;
+			}
+		}
+		elsif ($infuncproto && $line =~ /\)\s*$/ && ($line =~ tr/(// == ($line =~ tr/)// - 1))) {
+			# Line ends with closing parenthesis -> End of function prototype
+			$funcprotovalid = 1;
+			$infuncproto = 0;
+		}
+
 # check number of functions
 # and number of lines per function
-		if ($line =~ /({)/g) {
+		if ($line =~ /(\{)/g) {
 			$inscope += $#-;
-			if ($prevline =~ /^(.(?:typedef\s*)?(?:(?:$Storage|$Inline)\s*)*\s*$Type\s*(?:\b$Ident|\(\*\s*$Ident\))\s*)\(/s && $inscope == 1) {
+			if ($funcprotovalid && $inscope == 1) {
+				$infunc = 1;
 				$nbfunc++;
-				$funclines = 0;
+				$funclines = -1;
 				if ($max_funcs > 0 && $nbfunc > $max_funcs) {
 					my $tmpline = $realline - 1;
-					if ($showfile) {
-						$prefix = "$realfile:$tmpline: ";
-					} elsif ($emacs) {
-						if ($file) {
-							$prefix = "$realfile:$tmpline: ";
-						} else {
-							$prefix = "$realfile:$tmpline: ";
-						}
-					}
+					$prefix = "$realfile:$tmpline: ";
 					ERROR("FUNCTIONS",
 					  "More than $max_funcs functions in the file\n");
 				}
@@ -3856,17 +3929,18 @@ sub process {
 		}
 		if ($line =~ /(})/g) {
 			$inscope -= $#-;
+			$infunc = 0 if ($inscope == 0);
+			$funclines = 0 if ($infunc == 0);
 		}
-		
-		if ($inscope >= 1) {
+
+		if ($inscope >= 1 && $infunc == 1) {
 			$funclines++;
-			if ($funclines > $max_func_length + 1) {
+			if ($funclines > $max_func_length) {
 				WARN("FUNCTIONS",
 				  "More than $max_func_length lines in a function\n");
 			}
-		} else {
-			$funclines = 0;
 		}
+		# printf "[${infunc}][${inscope}|${infuncproto}][${funclines}]${line}\n";
 
 # open braces for enum, union and struct go on the same line.
 		# if ($line =~ /^.\s*{/ &&
@@ -3885,12 +3959,14 @@ sub process {
 		# 		}
 		# 	}
 		# }
-		#
+
 		if ($realfile =~ /\.c$/ &&
+		    $inscope == 0 &&
+		    ($line !~ /$Type\s*$Ident/ || $line =~ /union\s*$Ident(?!\s+\**$Ident)/) &&
 		    $line =~ /^.\s*(?:typedef\s+)?(enum|union|struct)(?:\s+$Ident)?\s*.*/ &&
 		    $line !~ /;$/) {
-					WARN("STRUCT_DEF",
-						"$1 definition should be avoided in .c files\n");
+			WARN("STRUCT_DEF",
+				"$1 definition should be avoided in .c files\n");
 		}
 
 		if ($line =~ /^.\s*(?:typedef\s+)?(enum|union|struct)(?:\s+$Ident)?\s*{/) {
@@ -3902,7 +3978,7 @@ sub process {
 				my $fixedline = rtrim($prevrawline) . " {";
 				fix_insert_line($fixlinenr, $fixedline);
 				$fixedline = $rawline;
-				$fixedline =~ s/^(.\s*){\s*/$1\t/;
+				$fixedline =~ s/^(.\s*)\{\s*/$1\t/;
 				if ($fixedline !~ /^\+\s*$/) {
 					fix_insert_line($fixlinenr, $fixedline);
 				}
@@ -4392,7 +4468,7 @@ sub process {
 			if (ERROR("SPACING",
 				  "space required before the open brace '{'\n" . $herecurr) &&
 			    $fix) {
-				$fixed[$fixlinenr] =~ s/^(\+.*(?:do|\))){/$1 {/;
+				$fixed[$fixlinenr] =~ s/^(\+.*(?:do|\)))\{/$1 {/;
 			}
 		}
 
@@ -4406,7 +4482,7 @@ sub process {
 
 # closing brace should have a space following it when it has anything
 # on the line
-		if ($line =~ /}(?!(?:,|;|\)))\S/) {
+		if ($line =~ /}(?!(?:}|,|;|\)))\S/) {
 			if (ERROR("SPACING",
 				  "space required after that close brace '}'\n" . $herecurr) &&
 			    $fix) {
@@ -5199,14 +5275,14 @@ sub process {
 		}
 
 # check for spaces before a quoted newline
-		if ($rawline =~ /^.*\".*\s\\n/) {
-			if (WARN("QUOTED_WHITESPACE_BEFORE_NEWLINE",
-				 "unnecessary whitespace before a quoted newline\n" . $herecurr) &&
-			    $fix) {
-				$fixed[$fixlinenr] =~ s/^(\+.*\".*)\s+\\n/$1\\n/;
-			}
+		# if ($rawline =~ /^.*\".*\s\\n/) {
+		# 	if (WARN("QUOTED_WHITESPACE_BEFORE_NEWLINE",
+		# 		 "unnecessary whitespace before a quoted newline\n" . $herecurr) &&
+		# 	    $fix) {
+		# 		$fixed[$fixlinenr] =~ s/^(\+.*\".*)\s+\\n/$1\\n/;
+		# 	}
 
-		}
+		# }
 
 # concatenated string without spaces between elements
 		if ($line =~ /$String[A-Z_]/ || $line =~ /[A-Za-z0-9_]$String/) {
@@ -5834,12 +5910,12 @@ sub process {
 			if (defined $cond) {
 				substr($s, 0, length($cond), '');
 			}
-			if ($s =~ /^\s*;/ &&
-			    $function_name ne 'uninitialized_var')
-			{
-				WARN("AVOID_EXTERNS",
-				     "externs should be avoided in .c files\n" .  $herecurr);
-			}
+			# if ($s =~ /^\s*;/ &&
+			#     $function_name ne 'uninitialized_var')
+			# {
+			# 	WARN("AVOID_EXTERNS",
+			# 	     "externs should be avoided in .c files\n" .  $herecurr);
+			# }
 
 			if ($paren_space =~ /\n/) {
 				WARN("FUNCTION_ARGUMENTS",

@@ -1,3 +1,10 @@
+struct test1_s *_getline(const int fd,
+	struct test_s *test,
+	enum test_e test2)
+{
+	return (test);
+}
+
 typedef unsigned int sample;
 
 struct sample_s

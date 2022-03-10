@@ -1,6 +1,7 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 
 use strict;
+use warnings;
 use File::Basename;
 
 ## Copyright (c) 1998 Michael Zucchi, All Rights Reserved        ##
@@ -41,6 +42,7 @@ use File::Basename;
 # -- Dan Luedtke <mail@danrl.de>
 
 my $V = '1.0';
+my $P = $0;
 
 sub printVersion {
 
@@ -84,6 +86,7 @@ Output selection modifiers:
 Other parameters:
   -v			Verbose output, more warnings and other information.
   -h			print STDOUT this help.
+  -r                    Run for every C source file (.c and .h) recursively
 
 EOF
     print STDOUT $message;
@@ -311,6 +314,7 @@ if ($#ARGV == -1) {
 my $kernelversion;
 my $dohighlight = "";
 
+my $recursive = 0;
 my $verbose = 0;
 my $output_mode = "list";
 my $output_preformatted = 0;
@@ -412,10 +416,13 @@ my $undescribed = "-- undescribed --";
 
 reset_state();
 
-while ($ARGV[0] =~ m/^-(.*)/) {
-    my $cmd = shift @ARGV;
-		if ($cmd eq "--version") {
-			printVersion();
+# while ($ARGV[0] =~ m/^-(.*)/) {
+for my $cmd (@ARGV) {
+    if ($cmd =~ m/^-(.*)/) {
+	shift @ARGV;
+    }
+    if ($cmd eq "--version") {
+	printVersion();
     } elsif ($cmd eq "-html") {
 	$output_mode = "html";
 	@highlights = @highlights_html;
@@ -462,8 +469,10 @@ while ($ARGV[0] =~ m/^-(.*)/) {
 	$verbose = 1;
     } elsif (($cmd eq "-h") || ($cmd eq "--help")) {
 	usage();
+    } elsif (($cmd eq "-r") || ($cmd eq "--recursive")) {
+	$recursive = 1;
     } elsif ($cmd eq '-no-doc-sections') {
-	    $no_doc_sections = 1;
+	$no_doc_sections = 1;
     } elsif ($cmd eq '-show-not-found') {
 	$show_not_found = 1;
     }
@@ -2026,7 +2035,7 @@ sub dump_struct($$) {
 	my $members = $3;
 
 	# ignore embedded structs or unions
-	$members =~ s/({.*})//g;
+	$members =~ s/(\{.*})//g;
 	$nested = $1;
 
 	# ignore members marked private:
@@ -2434,7 +2443,7 @@ sub dump_function($$) {
         $return_type = $1;
         $declaration_name = $2;
         $noret = 1;
-    } elsif ($prototype =~ m/^()([a-zA-Z0-9_~:]+)\s*\(([^\(]*)\)/ ||
+    } elsif (($prototype =~ m/^()([a-zA-Z0-9_~:]+)\s*\(([^\(]*)\)/ ||
 	$prototype =~ m/^(\w+)\s+([a-zA-Z0-9_~:]+)\s*\(([^\(]*)\)/ ||
 	$prototype =~ m/^(\w+\s*\*)\s*(?:\**\s*)?([a-zA-Z0-9_~:]+)\s*\(([^\(]*)\)/ ||
 	$prototype =~ m/^(\w+\s+\w+)\s+([a-zA-Z0-9_~:]+)\s*\(([^\(]*)\)/ ||
@@ -2450,14 +2459,16 @@ sub dump_function($$) {
 	$prototype =~ m/^(\w+\s+\w+\s+\w+\s*\*)\s*([a-zA-Z0-9_~:]+)\s*\(([^\{]*)\)/ ||
 	$prototype =~ m/^(\w+\s+\w+\s+\w+\s+\w+)\s+([a-zA-Z0-9_~:]+)\s*\(([^\{]*)\)/ ||
 	$prototype =~ m/^(\w+\s+\w+\s+\w+\s+\w+\s*\*)\s*([a-zA-Z0-9_~:]+)\s*\(([^\{]*)\)/ ||
-	$prototype =~ m/^(\w+\s+\w+\s*\*\s*\w+\s*\*\s*)\s*([a-zA-Z0-9_~:]+)\s*\(([^\{]*)\)/)  {
+	$prototype =~ m/^(\w+\s+\w+\s*\*\s*\w+\s*\*\s*)\s*([a-zA-Z0-9_~:]+)\s*\(([^\{]*)\)/) &&
+	$prototype !~ m/^typedef/)  {
 	$return_type = $1;
 	$declaration_name = $2;
 	my $args = $3;
 
 	create_parameterlist($args, ',', $file);
     } else {
-	if ($prototype !~ /^(?:typedef\s*)?(struct|enum|union)/) {
+	if ($prototype !~ /^(?:typedef\s*)?(struct|enum|union)/ &&
+	    $prototype !~ /^typedef/) {
 		print STDERR "${file}:$.: error: cannot understand function prototype: '$prototype'\n";
 		++$errors;
 	}
@@ -2793,8 +2804,8 @@ our $NonptrType	= qr{
 		(?:\s+$Modifier|\s+const)*
 	  }x;
 our $Type	= qr{
-		$NonptrType
-		(?:(?:\s|\*|\[\])+\s*const|(?:\s|\*\s*(?:const\s*)?|\[\])+|(?:\s*\[\s*\])+)?
+		$NonptrType\b
+		(?:(?:\s|\*|\[\])+\s*const\b|(?:\s|\*\s*(?:const\b\s*)?|\[\])+|(?:\s*\[\s*\])+)?
 		(?:\s+$Inline|\s+$Modifier)*
 	  }x;
 
@@ -2856,11 +2867,16 @@ sub process_file($) {
 	}
 
 	if ($_ =~ /^\s*(?:typedef\s+)?(enum|union|struct)(?:\s+($Ident))?\s*.*/s &&
-	    $_ !~ /;\s*$/)
+	    $_ !~ /;\s*$/ &&
+		$_ !~ /\(.*\)\s*$/)
 	{
 		# print STDOUT "$1 found: $2\n";
-		if (!length $identifier || $identifier ne "$1 $2") {
-			print STDERR "${file}:$.: warning: no description found for $1 $2\n";
+		if (!length $identifier ||
+		    !defined $2 ||
+		    (defined $1 && defined $2 &&$identifier ne "$1 $2")) {
+			print STDERR "${file}:$.: warning: no description found for $1";
+			print STDERR " $2" if (defined $2);
+			print STDERR "\n";
 			++$warnings;
 		}
 	}
@@ -3141,7 +3157,17 @@ if (open(SOURCE_MAP, "<.tmp_filelist.txt")) {
 	close(SOURCE_MAP);
 }
 
-foreach (@ARGV) {
+my @files_to_process = @ARGV;
+if ($recursive == 1) {
+	@files_to_process = split(/\n/, `find . -name "*.c" -o -name "*.h"`);
+	if (scalar @files_to_process == 0) {
+		my $exec_name = basename($P);
+		print "$exec_name: no input files\n";
+		exit(1);
+	}
+}
+
+foreach (@files_to_process) {
     chomp;
     process_file($_);
 }
